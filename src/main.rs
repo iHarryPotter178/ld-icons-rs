@@ -151,10 +151,8 @@ struct Position {
 
 #[derive(Clone, Debug)]
 struct Icon {
-    name: String,
     path: PathBuf,
     position: Position,
-    is_dir: bool,
 }
 
 fn load_positions(path: &Path) -> HashMap<String, Position> {
@@ -195,8 +193,6 @@ fn scan_desktop(config: &Config, positions: &HashMap<String, Position>) -> io::R
                 y: config.offset_y + (index as i32 % 6) * config.grid_y,
             });
             Icon {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                is_dir: entry.file_type().map(|t| t.is_dir()).unwrap_or(false),
                 path,
                 position,
             }
@@ -261,13 +257,18 @@ impl LinuxWatch {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        let watch_path =
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("watch path contains NUL byte: {}", path.display()),
+                )
+            })?;
         let wd = unsafe {
             inotify_add_watch(
                 fd,
-                std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-                    .unwrap()
-                    .as_ptr(),
-                (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO) as u32,
+                watch_path.as_ptr(),
+                IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO,
             )
         };
         if wd < 0 {
@@ -445,10 +446,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for WaylandState {
         {
             proxy.ack_configure(serial);
             state.configured = true;
-            if state.buffer.is_none() && width > 0 && height > 0 {
-                if let Err(error) = render_memfd(state, width as i32, height as i32, qh) {
-                    eprintln!("ldicons: unable to render Wayland buffer: {error}");
-                }
+            if state.buffer.is_none()
+                && width > 0
+                && height > 0
+                && let Err(error) = render_memfd(state, width as i32, height as i32, qh)
+            {
+                eprintln!("ldicons: unable to render Wayland buffer: {error}");
             }
         }
     }
@@ -476,7 +479,7 @@ fn render_memfd(
     };
     let size = i64::from(width.max(1)) * i64::from(height.max(1)) * 4;
     let name = std::ffi::CString::new("ldicons-frame").unwrap();
-    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC as u32) };
+    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -636,12 +639,12 @@ fn run(mut app: App, args: &Args) -> io::Result<()> {
                 app.refresh()?;
                 save_positions(&app.positions_path, &app.icons)?;
             }
-            if let Some(nsd) = &mut app.nsd {
-                if fd == nsd.fd() {
-                    for msg in nsd.read_events() {
-                        if args.verbose {
-                            eprintln!("[nsd] {msg}");
-                        }
+            if let Some(nsd) = &mut app.nsd
+                && fd == nsd.fd()
+            {
+                for msg in nsd.read_events() {
+                    if args.verbose {
+                        eprintln!("[nsd] {msg}");
                     }
                 }
             }
@@ -691,7 +694,14 @@ mod tests {
 
     #[test]
     fn nsd_lines_are_bounded() {
-        assert!(MAX_NSD_LINE < MAX_NSD_BUFFER);
-        assert_eq!(MAX_NSD_LINE, 16 * 1024);
+        fn line_limit() -> usize {
+            MAX_NSD_LINE
+        }
+        fn buffer_limit() -> usize {
+            MAX_NSD_BUFFER
+        }
+
+        assert!(line_limit() < buffer_limit());
+        assert_eq!(line_limit(), 16 * 1024);
     }
 }
