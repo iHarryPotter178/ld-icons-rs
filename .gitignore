@@ -11,6 +11,7 @@ env/
 # ---- Build / packaging ----
 build/
 dist/
+target/
 *.egg-info/
 
 # ---- Test / type-check / tool caches ----
@@ -35,5 +36,4 @@ startlog.txt
 icon_positions.json
 *.orig
 ldicons_*.py
-
 
