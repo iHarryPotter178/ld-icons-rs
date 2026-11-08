@@ -53,6 +53,29 @@ fn home_path(suffix: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(suffix)
 }
+
+fn xdg_desktop_dir() -> PathBuf {
+    if let Some(desktop) = std::env::var_os("XDG_DESKTOP_DIR") {
+        return PathBuf::from(desktop);
+    }
+
+    let user_dirs = home_path(".config/user-dirs.dirs");
+    let Ok(contents) = fs::read_to_string(user_dirs) else {
+        return home_path("Desktop");
+    };
+    let Some(value) = contents.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("XDG_DESKTOP_DIR=").map(|value| {
+            value
+                .trim_matches('"')
+                .replace("$HOME", &home_path("").to_string_lossy())
+        })
+    }) else {
+        return home_path("Desktop");
+    };
+    expand_path(&value)
+}
+
 fn default_config() -> PathBuf {
     home_path(".config/ldicons/ldicons.conf")
 }
@@ -76,9 +99,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            desktop: std::env::var_os("XDG_DESKTOP_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home_path("Desktop")),
+            desktop: xdg_desktop_dir(),
             show_hidden: true,
             grid_x: 140,
             grid_y: 180,
@@ -128,9 +149,7 @@ impl Config {
                 _ => {}
             }
         }
-        if let Ok(desktop) = std::env::var("XDG_DESKTOP_DIR") {
-            cfg.desktop = expand_path(&desktop);
-        }
+        cfg.desktop = xdg_desktop_dir();
         Ok(cfg)
     }
 }
@@ -697,6 +716,11 @@ mod tests {
         let path = expand_path("~/Desktop");
         assert!(path.ends_with("Desktop"));
         assert!(!path.to_string_lossy().starts_with("~/"));
+    }
+
+    #[test]
+    fn xdg_desktop_dir_falls_back_to_home_desktop() {
+        assert!(xdg_desktop_dir().is_absolute());
     }
 
     #[test]
