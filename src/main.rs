@@ -265,12 +265,17 @@ impl LinuxWatch {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        let watch_path =
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("watch path contains NUL byte: {}", path.display()),
+                )
+            })?;
         let wd = unsafe {
             inotify_add_watch(
                 fd,
-                std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-                    .unwrap()
-                    .as_ptr(),
+                watch_path.as_ptr(),
                 IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO,
             )
         };
