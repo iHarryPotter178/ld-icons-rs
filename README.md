@@ -37,8 +37,10 @@ shared-memory frames use an anonymous Linux `memfd`. This keeps idle CPU use nea
 and bounds long-lived allocations to directory metadata and one compositor frame.
 
 The Rust implementation covers desktop scanning, hidden-file configuration, persistent
-positions, nsd's newline-delimited JSON socket, and a wlroots layer-shell surface. It
+positions, nsd's newline-delimited JSON socket, and a Wayland layer-shell surface. It
 renders lightweight file markers without a scripting runtime or image-decoding stack.
+Idle operation blocks in `epoll_wait`; pointer motion is accepted only over icon
+rectangles, ignored unless dragging, and never causes an unconditional redraw.
 
 ## Features
 
@@ -66,7 +68,8 @@ renders lightweight file markers without a scripting runtime or image-decoding s
 
 This application only works on Wayland, and only on Wayland compositors that
 support the Layer Shell protocol. Layer shell **is supported** on:
-- wlroots based compositors (such as **Sway**)
+- wlroots based compositors (such as **Sway** and **labwc**)
+- **niri** with layer-shell support
 - Mir-based compositors (some may not enable the protocol by default and require
   `--add-wayland-extension zwlr_layer_shell_v1`)
 
@@ -147,6 +150,11 @@ make PREFIX="$HOME/.local" uninstall
 ldicons
 ```
 
+`ldicons` is Wayland-only and is intended to run beside a wallpaper process such as
+`swaybg`: `swaybg` owns the wallpaper while `ldicons` owns the desktop icon layer.
+The icon layer is placed above the wallpaper and below normal windows, and its input
+region covers icons only so compositor and labwc menu input remains available elsewhere.
+
 It's recommended to start this automatically with your Wayland compositor.
 For Sway, append the following to your config file `.config/sway/config`:
 ```
@@ -192,7 +200,7 @@ file_manager = pcmanfm
 - `socket_path` (default: `/tmp/nsd.sock`): Unix Domain Socket path to nsd
 - `file_manager` (default: `pcmanfm`): file manager command; pass mount path as argument
 
-The socket is integrated into ldicons' main `select()` loop, so response latency is the same as Wayland pointer/keyboard events.
+The socket is integrated into ldicons' main `epoll` loop, so response latency is the same as Wayland events.
 
 **Note:** nsd must be running separately. IPC connection is non-blocking and fails gracefully if nsd is unavailable.
 
@@ -247,6 +255,10 @@ Context-menu actions now also include a `Sort ▶` submenu:
 
 Hovering `Sort` opens the submenu automatically to the right.
 These actions are available from the icon context menu.
+
+Dragging an icon onto a folder icon moves the file or folder into that directory
+using an atomic same-filesystem rename. Dropping on empty desktop space persists a
+new grid position. Existing destination entries are never overwritten.
 
 The icon context menu also provides `Show hidden files` as a checkbox toggle.
 When enabled, dotfiles are included in the desktop icon list and persisted to config (`show_hidden_files = true`).
