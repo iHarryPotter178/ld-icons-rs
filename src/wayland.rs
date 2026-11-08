@@ -27,8 +27,14 @@ struct DragState {
 
 #[derive(Debug)]
 pub enum DropAction {
-    Reposition { path: PathBuf, position: Position },
-    MoveInto { source: PathBuf, destination: PathBuf },
+    Reposition {
+        path: PathBuf,
+        position: Position,
+    },
+    MoveInto {
+        source: PathBuf,
+        destination: PathBuf,
+    },
 }
 
 #[derive(Default)]
@@ -83,13 +89,17 @@ fn ensure_framebuffers(
         return Ok(false);
     }
     state.frame_buffers = None;
-    let shm = state.shm.as_ref().ok_or_else(|| io::Error::other("missing wl_shm"))?;
+    let shm = state
+        .shm
+        .as_ref()
+        .ok_or_else(|| io::Error::other("missing wl_shm"))?;
     state.frame_buffers = Some(FrameBuffers::new(shm, qh, width, height)?);
     Ok(true)
 }
 
 pub fn render_frame(state: &mut WaylandState, qh: &QueueHandle<WaylandState>) -> io::Result<()> {
-    let (Some(surface), Some((width, height))) = (state.surface.as_ref(), state.configured_size) else {
+    let (Some(surface), Some((width, height))) = (state.surface.as_ref(), state.configured_size)
+    else {
         return Ok(());
     };
     if !ensure_framebuffers(state, qh, width, height)? {
@@ -286,7 +296,8 @@ impl Dispatch<WlPointer, ()> for WaylandState {
                 {
                     let source = state.paths[drag.index].clone();
                     let position = state.icons[drag.index];
-                    let target = hit_icon_except(&state.icons, state.pointer_x, state.pointer_y, drag.index);
+                    let target =
+                        hit_icon_except(&state.icons, state.pointer_x, state.pointer_y, drag.index);
                     state.pending_drop = target
                         .filter(|&index| state.paths[index].is_dir())
                         .and_then(|index| {

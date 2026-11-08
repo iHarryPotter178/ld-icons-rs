@@ -1,5 +1,12 @@
-use libc::{IN_CLOEXEC, IN_CREATE, IN_DELETE, IN_MOVED_FROM, IN_MOVED_TO, O_NONBLOCK, c_void, inotify_add_watch, inotify_init1, read};
-use std::{io, os::fd::RawFd, path::{Path, PathBuf}};
+use libc::{
+    IN_CLOEXEC, IN_CREATE, IN_DELETE, IN_MOVED_FROM, IN_MOVED_TO, O_NONBLOCK, c_void,
+    inotify_add_watch, inotify_init1, read,
+};
+use std::{
+    io,
+    os::fd::RawFd,
+    path::{Path, PathBuf},
+};
 
 pub struct LinuxWatch {
     pub fd: RawFd,

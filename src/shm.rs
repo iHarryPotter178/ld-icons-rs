@@ -144,7 +144,9 @@ impl FrameBuffers {
     }
 
     pub fn buffer(&self, index: usize) -> Option<&WlBuffer> {
-        self.buffers.get(index).and_then(|slot| slot.buffer.as_ref())
+        self.buffers
+            .get(index)
+            .and_then(|slot| slot.buffer.as_ref())
     }
 
     pub fn paint(&mut self, index: usize, icons: &[Position]) {

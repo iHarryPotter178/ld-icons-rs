@@ -6,7 +6,10 @@ use crate::{
     watch::LinuxWatch,
     wayland::{DropAction, create_layer_surface, render_frame, sync_wayland_state},
 };
-use libc::{EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLLIN, epoll_create1, epoll_ctl, epoll_event, epoll_wait};
+use libc::{
+    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLLIN, epoll_create1, epoll_ctl, epoll_event,
+    epoll_wait,
+};
 use std::{
     fs, io,
     os::fd::{AsRawFd, RawFd},
@@ -217,7 +220,8 @@ pub fn run(mut app: App, args: &Args) -> io::Result<()> {
         }
 
         if state.needs_flush {
-            conn.flush().map_err(|error| io::Error::other(error.to_string()))?;
+            conn.flush()
+                .map_err(|error| io::Error::other(error.to_string()))?;
             state.needs_flush = false;
         }
     }
