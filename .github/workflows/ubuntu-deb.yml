@@ -1,0 +1,60 @@
+name: Ubuntu 26.10 Debian package
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build package in Ubuntu 26.10
+        run: |
+          docker pull ubuntu:26.10
+          docker run --rm \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            ubuntu:26.10 \
+            bash -euxo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --yes --no-install-recommends \
+                build-essential ca-certificates curl dpkg-dev
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs |
+                sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="/root/.cargo/bin:$PATH"
+              ./packaging/build-deb.sh
+            '
+
+      - name: Install package in a clean Ubuntu 26.10 container
+        run: |
+          docker run --rm \
+            --volume "$PWD:/src:ro" \
+            --workdir /src \
+            ubuntu:26.10 \
+            bash -euxo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --yes --no-install-recommends ca-certificates
+              apt-get install --yes ./target/deb/ld-icons_*.deb
+              command -v ldicons
+              ldicons --version
+              ldicons --check
+              dpkg-query --showformat="\${Package} \${Version}\n" --show ld-icons
+            '
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ld-icons-ubuntu-26.10-deb
+          path: target/deb/ld-icons_*.deb
+          if-no-files-found: error

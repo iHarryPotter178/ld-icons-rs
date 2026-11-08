@@ -12,6 +12,12 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+### Changed
+- Replaced the default Python runtime with a Rust implementation.
+- The Rust daemon uses Linux `epoll` and `inotify` for event-driven updates,
+  non-blocking nsd IPC, and `memfd_create` for Wayland shared-memory frames.
+- `make install` now installs the optimized Rust binary.
+
 ## [0.5.2] - 2026-03-21
 
 ### Added

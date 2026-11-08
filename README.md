@@ -22,11 +22,24 @@ Since my project (labwc DE) is intended to be lean, based on GTK, and free of ad
 
 The only remaining option was dicons by Geronymos, which unfortunately is not available in distributions, is not feature-complete, and requires compilation.
 
-For this reason, I decided to write an alternative in Python. I used Google's Gemini for the basics (connecting to the Wayland server, rendering files, and collecting features), and GitHub Copilot for debugging and improvements.
+For this reason, the original implementation was written in Python. The maintained implementation is now a small Rust daemon designed around Linux's event-driven primitives.
 
 The result is a tool that has all the features of dicons plus extensions like sorting, multi-file moves, a configuration file with numerous settings, and command-line options.
 
-So far, it has only been tested in a wlroots-based environment and within the project setup. Even with full debug output, performance was quite acceptable.
+So far, it has only been tested in a wlroots-based environment and within the project setup.
+
+## Rust implementation
+
+The Rust implementation is the default build. It deliberately avoids a GUI toolkit,
+image decoders, background worker threads, and periodic polling. Directory changes are
+received through `inotify`, file descriptors are multiplexed with `epoll`, and Wayland
+shared-memory frames use an anonymous Linux `memfd`. This keeps idle CPU use near zero
+and bounds long-lived allocations to directory metadata and one compositor frame.
+
+The current Rust port covers desktop scanning, hidden-file configuration, persistent
+positions, nsd's newline-delimited JSON socket, and a wlroots layer-shell surface. It
+renders lightweight file markers instead of Python's thumbnail pipeline; interaction
+features can be added without changing the event-loop architecture.
 
 ## Features
 
@@ -66,11 +79,9 @@ Layer shell **is not supported** on:
 
 ### Dependencies
 
-- Python 3.10+
-- `pip` (to install Python packages)
+- Rust 1.85+ and Cargo
 - A Wayland compositor that supports `zwlr_layer_shell_v1` (layer-shell)
-- Python packages listed in `requirements.txt`
-- `gettext` tools (`msgfmt`) for compiling localization files
+- Linux with `epoll`, `inotify`, and `memfd_create`
 
 ### Installation
 
@@ -81,11 +92,33 @@ git clone https://github.com/ThomasFunk/ld-icons
 cd ld-icons
 ```
 
-Install Python dependencies:
+Build and install:
 
 ```sh
-python3 -m pip install -r requirements.txt
+cargo build --release
+sudo make install
 ```
+
+### Ubuntu Debian package
+
+The repository includes a reproducible package check for Ubuntu 26.10. It builds
+`ld-icons` and installs the resulting package in a separate clean Ubuntu 26.10
+container:
+
+```sh
+docker pull ubuntu:26.10
+docker run --rm -v "$PWD:/src" -w /src ubuntu:26.10 \
+  bash -c 'apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl dpkg-dev && \
+    curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain stable && \
+    export PATH="/root/.cargo/bin:$PATH" && \
+    ./packaging/build-deb.sh'
+```
+
+GitHub Actions runs this build and performs a clean-container install test on
+pushes, pull requests, and manual dispatch. The generated `.deb` is retained as
+an Actions artifact.
 
 System-wide installation (default: `/usr/local`):
 
@@ -121,9 +154,24 @@ For Sway, append the following to your config file `.config/sway/config`:
 exec ldicons
 ```
 
-### Python script mode (`ldicons.py` / `ldicons`)
+The scanner can be checked without a Wayland session:
 
-For the Python implementation you can run:
+```sh
+ldicons --check
+```
+
+Runtime options:
+
+```sh
+ldicons \
+  --conf ~/.config/ldicons/ldicons.conf \
+  --pos ~/.config/ldicons/icon_positions.json \
+  --log ~/.config/ldicons/ldicons.log \
+  --verbose
+```
+
+The Python implementation (`ldicons.py`) is retained as historical reference only.
+It is not installed by `make install` and is no longer the default runtime.
 
 ```sh
 python3 -u ldicons.py
@@ -288,4 +336,3 @@ This tool is not fully tested yet. Everyone who wants to help is very welcome. ^
 ## License
 
 This project is licensed under the GPL-3 License - see the `LICENSE` file for details
-

@@ -3,7 +3,7 @@ BINDIR ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share/ld-icons
 DESTDIR ?=
 
-PYTHON ?= python3
+CARGO ?= cargo
 
 INSTALL ?= install
 RM ?= rm -rf
@@ -11,20 +11,15 @@ RM ?= rm -rf
 .PHONY: all install uninstall reinstall
 
 all:
-	@echo "Nothing to build. Use: make install"
+	$(CARGO) build --release
 
 install:
 	$(INSTALL) -d "$(DESTDIR)$(DATADIR)"
 	$(INSTALL) -d "$(DESTDIR)$(BINDIR)"
-	$(INSTALL) -m 755 ldicons.py "$(DESTDIR)$(DATADIR)/ldicons.py"
+	$(CARGO) build --release
+	$(INSTALL) -m 755 target/release/ld-icons "$(DESTDIR)$(BINDIR)/ldicons"
 	$(INSTALL) -m 644 ldicons.conf "$(DESTDIR)$(DATADIR)/ldicons.conf"
-	$(INSTALL) -m 644 Not-Found-Icon.svg "$(DESTDIR)$(DATADIR)/Not-Found-Icon.svg"
-	cp -r locale "$(DESTDIR)$(DATADIR)/"
-	cp -r protocols "$(DESTDIR)$(DATADIR)/"
-	printf '%s\n' '#!/usr/bin/env sh' \
-		'exec "$(PYTHON)" "$(DATADIR)/ldicons.py" "$$@"' \
-		> "$(DESTDIR)$(BINDIR)/ldicons"
-	chmod 755 "$(DESTDIR)$(BINDIR)/ldicons"
+	$(INSTALL) -m 644 README.md "$(DESTDIR)$(DATADIR)/README.md"
 
 uninstall:
 	$(RM) "$(DESTDIR)$(BINDIR)/ldicons"
