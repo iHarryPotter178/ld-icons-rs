@@ -99,6 +99,27 @@ cargo build --release
 sudo make install
 ```
 
+### Ubuntu Debian package
+
+The repository includes a reproducible package check for Ubuntu 26.10. It builds
+`ld-icons` and installs the resulting package in a separate clean Ubuntu 26.10
+container:
+
+```sh
+docker pull ubuntu:26.10
+docker run --rm -v "$PWD:/src" -w /src ubuntu:26.10 \
+  bash -c 'apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl dpkg-dev && \
+    curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain stable && \
+    export PATH="/root/.cargo/bin:$PATH" && \
+    ./packaging/build-deb.sh'
+```
+
+GitHub Actions runs this build and performs a clean-container install test on
+pushes, pull requests, and manual dispatch. The generated `.deb` is retained as
+an Actions artifact.
+
 System-wide installation (default: `/usr/local`):
 
 ```sh

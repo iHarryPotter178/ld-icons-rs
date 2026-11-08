@@ -1,9 +1,9 @@
 use clap::Parser;
 use libc::{
-    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLLIN, IN_CLOEXEC, IN_CREATE, IN_DELETE, IN_MOVED_FROM,
-    IN_MOVED_TO, MAP_SHARED, MFD_CLOEXEC, O_NONBLOCK, PROT_READ, PROT_WRITE, c_void, epoll_create1,
-    epoll_ctl, epoll_event, epoll_wait, ftruncate, inotify_add_watch, inotify_init1, memfd_create,
-    mmap, munmap, read,
+    EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLLIN, IN_CLOEXEC, IN_CREATE, IN_DELETE,
+    IN_MOVED_FROM, IN_MOVED_TO, MAP_SHARED, MFD_CLOEXEC, O_NONBLOCK, PROT_READ, PROT_WRITE, c_void,
+    epoll_create1, epoll_ctl, epoll_event, epoll_wait, ftruncate, inotify_add_watch, inotify_init1,
+    memfd_create, mmap, munmap, read,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -143,18 +143,16 @@ fn expand_path(value: &str) -> PathBuf {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Position {
     x: i32,
     y: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Icon {
-    name: String,
     path: PathBuf,
     position: Position,
-    is_dir: bool,
 }
 
 fn load_positions(path: &Path) -> HashMap<String, Position> {
@@ -170,7 +168,7 @@ fn save_positions(path: &Path, icons: &[Icon]) -> io::Result<()> {
     }
     let positions: HashMap<_, _> = icons
         .iter()
-        .map(|i| (i.path.to_string_lossy().into_owned(), i.position.clone()))
+        .map(|i| (i.path.to_string_lossy().into_owned(), i.position))
         .collect();
     let data = serde_json::to_vec_pretty(&positions).map_err(io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
@@ -190,16 +188,11 @@ fn scan_desktop(config: &Config, positions: &HashMap<String, Position>) -> io::R
         .map(|(index, entry)| {
             let path = entry.path();
             let key = path.to_string_lossy().into_owned();
-            let position = positions.get(&key).cloned().unwrap_or_else(|| Position {
+            let position = positions.get(&key).copied().unwrap_or_else(|| Position {
                 x: config.offset_x + (index as i32 / 6) * config.grid_x,
                 y: config.offset_y + (index as i32 % 6) * config.grid_y,
             });
-            Icon {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                is_dir: entry.file_type().map(|t| t.is_dir()).unwrap_or(false),
-                path,
-                position,
-            }
+            Icon { path, position }
         })
         .collect())
 }
@@ -220,11 +213,15 @@ impl NsdClient {
     fn fd(&self) -> RawFd {
         self.stream.as_raw_fd()
     }
-    fn read_events(&mut self) -> Vec<serde_json::Value> {
+    fn read_events(&mut self, verbose: bool) -> bool {
         let mut chunk = [0u8; 4096];
+        let mut disconnected = false;
         loop {
             match (&self.stream).read(&mut chunk) {
-                Ok(0) => break,
+                Ok(0) => {
+                    disconnected = true;
+                    break;
+                }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Ok(n) => {
                     if self.buffer.len() + n > MAX_NSD_BUFFER {
@@ -233,21 +230,28 @@ impl NsdClient {
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    disconnected = true;
+                    break;
+                }
             }
         }
-        let mut result = Vec::new();
-        while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
-            let line = self.buffer.drain(..=end).collect::<Vec<_>>();
-            if line.len() > MAX_NSD_LINE {
-                continue;
-            }
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line[..line.len() - 1])
+        let mut consumed = 0;
+        while let Some(relative_end) = self.buffer[consumed..].iter().position(|b| *b == b'\n') {
+            let end = consumed + relative_end;
+            let line = &self.buffer[consumed..end];
+            if verbose
+                && line.len() <= MAX_NSD_LINE
+                && let Ok(value) = serde_json::from_slice::<serde_json::Value>(line)
             {
-                result.push(value);
+                eprintln!("[nsd] {value}");
             }
+            consumed = end + 1;
         }
-        result
+        if consumed != 0 {
+            self.buffer.drain(..consumed);
+        }
+        !disconnected
     }
 }
 
@@ -267,7 +271,7 @@ impl LinuxWatch {
                 std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
                     .unwrap()
                     .as_ptr(),
-                (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO) as u32,
+                IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO,
             )
         };
         if wd < 0 {
@@ -445,10 +449,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for WaylandState {
         {
             proxy.ack_configure(serial);
             state.configured = true;
-            if state.buffer.is_none() && width > 0 && height > 0 {
-                if let Err(error) = render_memfd(state, width as i32, height as i32, qh) {
-                    eprintln!("ldicons: unable to render Wayland buffer: {error}");
-                }
+            if state.buffer.is_none()
+                && width > 0
+                && height > 0
+                && let Err(error) = render_memfd(state, width as i32, height as i32, qh)
+            {
+                eprintln!("ldicons: unable to render Wayland buffer: {error}");
             }
         }
     }
@@ -476,7 +482,7 @@ fn render_memfd(
     };
     let size = i64::from(width.max(1)) * i64::from(height.max(1)) * 4;
     let name = std::ffi::CString::new("ldicons-frame").unwrap();
-    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC as u32) };
+    let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -599,6 +605,14 @@ fn epoll_add(epoll: RawFd, fd: RawFd) -> io::Result<()> {
     }
 }
 
+fn epoll_delete(epoll: RawFd, fd: RawFd) -> io::Result<()> {
+    if unsafe { epoll_ctl(epoll, EPOLL_CTL_DEL, fd, std::ptr::null_mut()) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn run(mut app: App, args: &Args) -> io::Result<()> {
     if args.check {
         println!(
@@ -610,10 +624,8 @@ fn run(mut app: App, args: &Args) -> io::Result<()> {
     }
     let conn = Connection::connect_to_env()
         .map_err(|e| io::Error::other(format!("Wayland connection failed: {e}")))?;
-    let (mut queue, mut state) = create_layer_surface(
-        &conn,
-        app.icons.iter().map(|icon| icon.position.clone()).collect(),
-    )?;
+    let (mut queue, mut state) =
+        create_layer_surface(&conn, app.icons.iter().map(|icon| icon.position).collect())?;
     let epoll = unsafe { epoll_create1(EPOLL_CLOEXEC) };
     if epoll < 0 {
         return Err(io::Error::last_os_error());
@@ -636,14 +648,17 @@ fn run(mut app: App, args: &Args) -> io::Result<()> {
                 app.refresh()?;
                 save_positions(&app.positions_path, &app.icons)?;
             }
-            if let Some(nsd) = &mut app.nsd {
-                if fd == nsd.fd() {
-                    for msg in nsd.read_events() {
-                        if args.verbose {
-                            eprintln!("[nsd] {msg}");
-                        }
-                    }
-                }
+            let mut nsd_disconnected = false;
+            if let Some(nsd) = &mut app.nsd
+                && fd == nsd.fd()
+                && !nsd.read_events(args.verbose)
+            {
+                let nsd_fd = nsd.fd();
+                epoll_delete(epoll, nsd_fd)?;
+                nsd_disconnected = true;
+            }
+            if nsd_disconnected {
+                app.nsd = None;
             }
             if fd == wayland_fd {
                 queue
@@ -691,7 +706,9 @@ mod tests {
 
     #[test]
     fn nsd_lines_are_bounded() {
-        assert!(MAX_NSD_LINE < MAX_NSD_BUFFER);
+        const {
+            assert!(MAX_NSD_LINE < MAX_NSD_BUFFER);
+        }
         assert_eq!(MAX_NSD_LINE, 16 * 1024);
     }
 }
