@@ -24,7 +24,7 @@ The only remaining option was dicons by Geronymos, which unfortunately is not av
 
 For this reason, the original implementation was written in Python. The maintained implementation is now a small Rust daemon designed around Linux's event-driven primitives.
 
-The result is a tool that has all the features of dicons plus extensions like sorting, multi-file moves, a configuration file with numerous settings, and command-line options.
+The result is a lightweight Rust daemon with a configuration file and command-line options.
 
 So far, it has only been tested in a wlroots-based environment and within the project setup.
 
@@ -36,10 +36,9 @@ received through `inotify`, file descriptors are multiplexed with `epoll`, and W
 shared-memory frames use an anonymous Linux `memfd`. This keeps idle CPU use near zero
 and bounds long-lived allocations to directory metadata and one compositor frame.
 
-The current Rust port covers desktop scanning, hidden-file configuration, persistent
+The Rust implementation covers desktop scanning, hidden-file configuration, persistent
 positions, nsd's newline-delimited JSON socket, and a wlroots layer-shell surface. It
-renders lightweight file markers instead of Python's thumbnail pipeline; interaction
-features can be added without changing the event-loop architecture.
+renders lightweight file markers without a scripting runtime or image-decoding stack.
 
 ## Features
 
@@ -170,23 +169,6 @@ ldicons \
   --verbose
 ```
 
-The Python implementation (`ldicons.py`) is retained as historical reference only.
-It is not installed by `make install` and is no longer the default runtime.
-
-```sh
-python3 -u ldicons.py
-```
-
-CLI options:
-
-```sh
-python3 -u ldicons.py \
-  -c ~/.config/ldicons/ldicons.conf \
-  -p ~/.config/ldicons/icon_positions.json \
-  -l ~/.config/ldicons/ldicons.log \
-  --verbose
-```
-
 - `-c, --conf`: config path
 - `-p, --pos`: icon positions JSON path
 - `-l, --log`: log file path (default: `~/.config/ldicons/ldicons.log`)
@@ -213,14 +195,6 @@ file_manager = pcmanfm
 The socket is integrated into ldicons' main `select()` loop, so response latency is the same as Wayland pointer/keyboard events.
 
 **Note:** nsd must be running separately. IPC connection is non-blocking and fails gracefully if nsd is unavailable.
-
-Input event debugging can be enabled with:
-
-```sh
-LDICONS_INPUT_DEBUG=1 python3 -u ldicons.py
-```
-
-This prints `enter/motion/button` pointer events to help diagnose hover/click issues.
 
 The double-click opening behavior can be tuned in `ldicons.conf`:
 
