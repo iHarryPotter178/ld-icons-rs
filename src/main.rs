@@ -15,11 +15,12 @@ use std::{
     path::{Path, PathBuf},
 };
 use wayland_client::{
-    Connection, Dispatch, EventQueue, QueueHandle,
+    Connection, Dispatch, EventQueue, QueueHandle, WEnum,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput, wl_region::WlRegion,
-        wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput,
+        wl_pointer::WlPointer, wl_region::WlRegion, wl_seat::WlSeat, wl_shm::WlShm,
+        wl_shm_pool::WlShmPool, wl_surface::WlSurface,
     },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -162,7 +163,7 @@ fn expand_path(value: &str) -> PathBuf {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct Position {
     x: i32,
     y: i32,
@@ -172,6 +173,33 @@ struct Position {
 struct Icon {
     path: PathBuf,
     position: Position,
+}
+
+#[derive(Clone, Debug)]
+struct DragState {
+    index: usize,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+fn snap_axis(value: f64, origin: i32, spacing: i32) -> i32 {
+    let spacing = spacing.max(1);
+    let relative = (value - f64::from(origin)) / f64::from(spacing);
+    (f64::from(origin) + relative.round() * f64::from(spacing))
+        .max(0.0)
+        .min(f64::from(i32::MAX)) as i32
+}
+
+#[derive(Debug)]
+enum DropAction {
+    Reposition {
+        path: PathBuf,
+        position: Position,
+    },
+    MoveInto {
+        source: PathBuf,
+        destination: PathBuf,
+    },
 }
 
 fn load_positions(path: &Path) -> HashMap<String, Position> {
@@ -352,18 +380,96 @@ impl App {
     }
 }
 
+fn sync_wayland_state(state: &mut WaylandState, app: &App) {
+    state.drag = None;
+    state.pending_drop = None;
+    state.icons.clear();
+    state.paths.clear();
+    state
+        .icons
+        .extend(app.icons.iter().map(|icon| icon.position));
+    state
+        .paths
+        .extend(app.icons.iter().map(|icon| icon.path.clone()));
+}
+
+fn apply_drop(app: &mut App, action: DropAction) -> io::Result<()> {
+    match action {
+        DropAction::MoveInto {
+            source,
+            destination,
+        } => {
+            if source == destination {
+                return Ok(());
+            }
+            if destination.exists() {
+                eprintln!(
+                    "ldicons: refusing to replace existing desktop item {}",
+                    destination.display()
+                );
+                return Ok(());
+            }
+            if let Err(error) = fs::rename(&source, &destination) {
+                eprintln!(
+                    "ldicons: unable to move {} into {}: {error}",
+                    source.display(),
+                    destination.display()
+                );
+                return Ok(());
+            }
+            app.refresh()?;
+        }
+        DropAction::Reposition { path, position } => {
+            if let Some(icon) = app.icons.iter_mut().find(|icon| icon.path == path) {
+                icon.position = position;
+            }
+        }
+    }
+    save_positions(&app.positions_path, &app.icons)
+}
+
 #[derive(Default)]
 struct WaylandState {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    seat: Option<WlSeat>,
+    pointer: Option<WlPointer>,
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     buffer: Option<WlBuffer>,
     pool: Option<WlShmPool>,
     backing: Option<File>,
     icons: Vec<Position>,
+    paths: Vec<PathBuf>,
+    drag: Option<DragState>,
+    pointer_x: f64,
+    pointer_y: f64,
+    dirty: bool,
+    input_region: Option<WlRegion>,
+    pending_drop: Option<DropAction>,
+    configured_size: Option<(i32, i32)>,
+    needs_flush: bool,
+    grid_x: i32,
+    grid_y: i32,
+    offset_x: i32,
+    offset_y: i32,
     configured: bool,
+}
+
+fn hit_icon(icons: &[Position], x: f64, y: f64) -> Option<usize> {
+    hit_icon_except(icons, x, y, usize::MAX)
+}
+
+fn hit_icon_except(icons: &[Position], x: f64, y: f64, excluded: usize) -> Option<usize> {
+    icons.iter().enumerate().find_map(|(index, position)| {
+        (index != excluded
+            && x >= f64::from(position.x)
+            && x < f64::from(position.x + ICON_SIZE)
+            && y >= f64::from(position.y)
+            && y < f64::from(position.y + ICON_SIZE))
+        .then_some(index)
+    })
 }
 
 impl Dispatch<wayland_client::protocol::wl_registry::WlRegistry, GlobalListContents>
@@ -388,6 +494,98 @@ impl Dispatch<WlCompositor, ()> for WaylandState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+impl Dispatch<WlSeat, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        proxy: &WlSeat,
+        event: wayland_client::protocol::wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wayland_client::protocol::wl_seat::Event::Capabilities { capabilities } = event
+            && let WEnum::Value(capabilities) = capabilities
+            && capabilities.contains(wayland_client::protocol::wl_seat::Capability::Pointer)
+            && state.pointer.is_none()
+        {
+            state.pointer = Some(proxy.get_pointer(qh, ()));
+        }
+    }
+}
+impl Dispatch<WlPointer, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &WlPointer,
+        event: wayland_client::protocol::wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_pointer::{ButtonState, Event};
+        match event {
+            Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            }
+            | Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_x = surface_x;
+                state.pointer_y = surface_y;
+                if let Some(drag) = &state.drag {
+                    let position = Position {
+                        x: snap_axis(surface_x - drag.offset_x, state.offset_x, state.grid_x),
+                        y: snap_axis(surface_y - drag.offset_y, state.offset_y, state.grid_y),
+                    };
+                    if state.icons[drag.index] != position {
+                        state.icons[drag.index] = position;
+                        state.dirty = true;
+                    }
+                }
+            }
+            Event::Button {
+                button: 0x110,
+                state: button_state,
+                ..
+            } => {
+                if button_state == WEnum::Value(ButtonState::Pressed) && state.drag.is_none() {
+                    if let Some(index) = hit_icon(&state.icons, state.pointer_x, state.pointer_y) {
+                        let icon = state.icons[index];
+                        state.drag = Some(DragState {
+                            index,
+                            offset_x: state.pointer_x - f64::from(icon.x),
+                            offset_y: state.pointer_y - f64::from(icon.y),
+                        });
+                    }
+                } else if button_state == WEnum::Value(ButtonState::Released)
+                    && let Some(drag) = state.drag.take()
+                {
+                    let source = state.paths[drag.index].clone();
+                    let position = state.icons[drag.index];
+                    let target =
+                        hit_icon_except(&state.icons, state.pointer_x, state.pointer_y, drag.index);
+                    state.pending_drop = target
+                        .filter(|&index| state.paths[index].is_dir())
+                        .and_then(|index| {
+                            source.file_name().map(|name| DropAction::MoveInto {
+                                destination: state.paths[index].join(name),
+                                source: source.clone(),
+                            })
+                        })
+                        .or(Some(DropAction::Reposition {
+                            path: source,
+                            position,
+                        }));
+                    state.dirty = true;
+                }
+            }
+            _ => {}
+        }
     }
 }
 impl Dispatch<WlShm, ()> for WaylandState {
@@ -447,13 +645,22 @@ impl Dispatch<ZwlrLayerShellV1, ()> for WaylandState {
 }
 impl Dispatch<WlBuffer, ()> for WaylandState {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         _: &WlBuffer,
-        _: wayland_client::protocol::wl_buffer::Event,
+        event: wayland_client::protocol::wl_buffer::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
+        if matches!(event, wayland_client::protocol::wl_buffer::Event::Release) {
+            state.buffer = None;
+            if state.dirty {
+                state.dirty = false;
+                if let Err(error) = render_memfd(state, qh) {
+                    eprintln!("ldicons: unable to redraw Wayland buffer: {error}");
+                }
+            }
+        }
     }
 }
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for WaylandState {
@@ -473,10 +680,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for WaylandState {
         {
             proxy.ack_configure(serial);
             state.configured = true;
+            state.configured_size = Some((width as i32, height as i32));
             if state.buffer.is_none()
                 && width > 0
                 && height > 0
-                && let Err(error) = render_memfd(state, width as i32, height as i32, qh)
+                && let Err(error) = render_memfd(state, qh)
             {
                 eprintln!("ldicons: unable to render Wayland buffer: {error}");
             }
@@ -495,13 +703,12 @@ impl Dispatch<WlShmPool, ()> for WaylandState {
     }
 }
 
-fn render_memfd(
-    state: &mut WaylandState,
-    width: i32,
-    height: i32,
-    qh: &QueueHandle<WaylandState>,
-) -> io::Result<()> {
+fn render_memfd(state: &mut WaylandState, qh: &QueueHandle<WaylandState>) -> io::Result<()> {
     let Some(shm) = state.shm.as_ref() else {
+        return Ok(());
+    };
+    let (Some(surface), Some((width, height))) = (state.surface.as_ref(), state.configured_size)
+    else {
         return Ok(());
     };
     let size = i64::from(width.max(1)) * i64::from(height.max(1)) * 4;
@@ -556,25 +763,40 @@ fn render_memfd(
         qh,
         (),
     );
-    if let Some(surface) = &state.surface {
-        surface.attach(Some(&buffer), 0, 0);
-        surface.damage_buffer(0, 0, width, height);
-        surface.commit();
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, width, height);
+    surface.commit();
+    let region = state
+        .compositor
+        .as_ref()
+        .expect("compositor is bound")
+        .create_region(qh, ());
+    for position in &state.icons {
+        region.add(position.x, position.y, ICON_SIZE, ICON_SIZE);
     }
+    surface.set_input_region(Some(&region));
+    state.input_region = Some(region);
     state.backing = Some(backing);
     state.pool = Some(pool);
     state.buffer = Some(buffer);
+    state.needs_flush = true;
     Ok(())
 }
 
 fn create_layer_surface(
     conn: &Connection,
-    icons: Vec<Position>,
+    icons: &[Icon],
+    config: &Config,
 ) -> io::Result<(EventQueue<WaylandState>, WaylandState)> {
     let (globals, queue) =
         registry_queue_init(conn).map_err(|e| io::Error::other(e.to_string()))?;
     let mut state = WaylandState {
-        icons,
+        icons: icons.iter().map(|icon| icon.position).collect(),
+        paths: icons.iter().map(|icon| icon.path.clone()).collect(),
+        grid_x: config.grid_x,
+        grid_y: config.grid_y,
+        offset_x: config.offset_x,
+        offset_y: config.offset_y,
         ..WaylandState::default()
     };
     let qh = queue.handle();
@@ -593,11 +815,12 @@ fn create_layer_surface(
             .bind::<ZwlrLayerShellV1, _, _>(&qh, 1..=4, ())
             .map_err(|e| io::Error::other(e.to_string()))?,
     );
+    state.seat = globals.bind::<WlSeat, _, _>(&qh, 1..=9, ()).ok();
     let surface = state.compositor.as_ref().unwrap().create_surface(&qh, ());
     let layer = state.layer_shell.as_ref().unwrap().get_layer_surface(
         &surface,
         None,
-        zwlr_layer_shell_v1::Layer::Background,
+        zwlr_layer_shell_v1::Layer::Bottom,
         "ldicons".into(),
         &qh,
         (),
@@ -648,8 +871,7 @@ fn run(mut app: App, args: &Args) -> io::Result<()> {
     }
     let conn = Connection::connect_to_env()
         .map_err(|e| io::Error::other(format!("Wayland connection failed: {e}")))?;
-    let (mut queue, mut state) =
-        create_layer_surface(&conn, app.icons.iter().map(|icon| icon.position).collect())?;
+    let (mut queue, mut state) = create_layer_surface(&conn, &app.icons, &app.config)?;
     let epoll = unsafe { epoll_create1(EPOLL_CLOEXEC) };
     if epoll < 0 {
         return Err(io::Error::last_os_error());
@@ -671,6 +893,8 @@ fn run(mut app: App, args: &Args) -> io::Result<()> {
             if fd == app.watch.fd && app.watch.drain() {
                 app.refresh()?;
                 save_positions(&app.positions_path, &app.icons)?;
+                sync_wayland_state(&mut state, &app);
+                state.dirty = true;
             }
             let mut nsd_disconnected = false;
             if let Some(nsd) = &mut app.nsd
@@ -689,8 +913,21 @@ fn run(mut app: App, args: &Args) -> io::Result<()> {
                     .blocking_dispatch(&mut state)
                     .map_err(|e| io::Error::other(e.to_string()))?;
             }
+            if let Some(action) = state.pending_drop.take() {
+                apply_drop(&mut app, action)?;
+                sync_wayland_state(&mut state, &app);
+                state.dirty = true;
+            }
         }
-        conn.flush().ok();
+        if state.dirty && state.buffer.is_none() && state.configured_size.is_some() {
+            state.dirty = false;
+            render_memfd(&mut state, &queue.handle())?;
+        }
+        if state.needs_flush {
+            conn.flush()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            state.needs_flush = false;
+        }
     }
 }
 
@@ -721,6 +958,20 @@ mod tests {
     #[test]
     fn xdg_desktop_dir_falls_back_to_home_desktop() {
         assert!(xdg_desktop_dir().is_absolute());
+    }
+
+    #[test]
+    fn drag_positions_snap_to_grid() {
+        assert_eq!(snap_axis(118.0, 50, 140), 50);
+        assert_eq!(snap_axis(131.0, 50, 140), 190);
+    }
+
+    #[test]
+    fn hit_testing_only_covers_icon_rectangles() {
+        let icons = [Position { x: 50, y: 50 }, Position { x: 190, y: 50 }];
+        assert_eq!(hit_icon(&icons, 60.0, 60.0), Some(0));
+        assert_eq!(hit_icon(&icons, 120.0, 60.0), None);
+        assert_eq!(hit_icon_except(&icons, 200.0, 60.0, 0), Some(1));
     }
 
     #[test]
